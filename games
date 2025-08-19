@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Therapy Games – Rehabilitation Centre</title>
+  <style>
+    body { margin:0; font-family:Arial, sans-serif;
+      background:linear-gradient(135deg,#1e3c72,#2a5298); color:#fff; }
+    header { padding:1rem; text-align:center;
+      font-size:1.6rem; font-weight:bold;
+      background:rgba(0,0,0,0.6); }
+    section { display:none; }
+    #home { display:flex; flex-direction:column; align-items:center;
+      justify-content:center; height:100vh; gap:20px; text-align:center; }
+    button { background:#4facfe; color:white; border:none;
+      padding:14px 22px; font-size:1.1rem; border-radius:8px;
+      cursor:pointer; width:250px; }
+    button:hover { background:#00c6ff; }
+    #hud { display:flex; justify-content:space-around;
+      background:rgba(0,0,0,0.5); padding:.5rem; font-size:1.1rem; }
+    canvas { background:#111; border-radius:10px; max-width:96vw; height:auto; }
+    .center { display:flex; flex-direction:column; align-items:center; margin-top:10px; }
+    #gameOver { display:none; flex-direction:column; justify-content:center; align-items:center;
+      position:fixed; inset:0; background:rgba(0,0,0,0.85); z-index:20;
+      color:#fff; font-size:1.5rem; text-align:center; }
+    #gameOver button, #gameOver a {
+      margin-top:15px; padding:12px 18px; font-size:1rem;
+      border-radius:8px; text-decoration:none; }
+    #gameOver a { background:#25D366; color:#fff; }
+  </style>
+</head>
+<body>
+  <header>Therapy Games – Rehabilitation Centre</header>
+
+  <!-- Homepage -->
+  <section id="home" style="display:flex">
+    <h1>Welcome</h1>
+    <p>Select a game to start your rehabilitation exercise.</p>
+    <button onclick="openGame('grab')">Grab & Drop Cubes</button>
+    <button onclick="openGame('catch')">Catch the Falling Objects</button>
+  </section>
+
+  <!-- HUD -->
+  <div id="hud" style="display:none">
+    <div>Score: <span id="score">0</span></div>
+    <div>Time: <span id="timer">01:00</span></div>
+    <div>Best: <span id="highScore">0</span></div>
+    <button onclick="restartGame()">Reset</button>
+  </div>
+
+  <!-- Game Container -->
+  <div class="center">
+    <video id="webcam" autoplay playsinline style="display:none"></video>
+    <canvas id="output_canvas"></canvas>
+  </div>
+
+  <!-- Game Over -->
+  <div id="gameOver">
+    <h2>Game Over</h2>
+    <p id="finalScore"></p>
+    <p id="bestScore"></p>
+    <button onclick="restartGame()">Play Again</button>
+    <a id="shareBtn" target="_blank">Share on WhatsApp</a>
+  </div>
+
+  <!-- Hand Tracking + Games -->
+  <script type="module">
+    import { HandLandmarker, FilesetResolver, DrawingUtils }
+      from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0";
+
+    const videoEl = document.getElementById("webcam");
+    const canvasEl = document.getElementById("output_canvas");
+    const ctx = canvasEl.getContext("2d");
+
+    const hud = document.getElementById("hud");
+    const scoreEl = document.getElementById("score");
+    const timerEl = document.getElementById("timer");
+    const highScoreEl = document.getElementById("highScore");
+
+    let handLandmarker, drawingUtils;
+    let score=0, highScore=0, timerInterval, gameOver=false;
+    let currentGame=null;
+
+    // --- GAME OBJECTS ---
+    let cube=null; let target=null;
+    let basket={x:0,y:0,w:120,h:30};
+    let apples=[]; let isFist=false;
+
+    const loadLandmarker = async () => {
+      const vision = await FilesetResolver.forVisionTasks(
+        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0/wasm"
+      );
+      handLandmarker = await HandLandmarker.createFromOptions(vision,{
+        baseOptions:{
+          modelAssetPath:"https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+          delegate:"GPU"
+        },
+        runningMode:"VIDEO", numHands:1
+      });
+      drawingUtils=new DrawingUtils(ctx);
+    };
+
+    const startCamera=async()=>{
+      const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'user'}});
+      videoEl.srcObject=stream;
+      videoEl.onloadedmetadata=()=>{
+        videoEl.play();
+        canvasEl.width=videoEl.videoWidth;
+        canvasEl.height=videoEl.videoHeight;
+        basket.y=canvasEl.height-60;
+        if(currentGame==="grab") spawnCube();
+        if(currentGame==="catch") spawnApple();
+        predictWebcam();
+      };
+    };
+
+    let lastVideoTime=-1;
+    const dist=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
+
+    function spawnCube(){
+      cube={x:canvasEl.width/2,y:canvasEl.height/2,size:50,held:false};
+      target={x:Math.random()*(canvasEl.width-100),
+              y:Math.random()*(canvasEl.height-200)+100,size:60};
+    }
+    function spawnApple(){
+      apples.push({x:Math.random()*(canvasEl.width-30),y:-20,size:30});
+    }
+
+    async function predictWebcam(){
+      if(gameOver) return;
+      let startTimeMs=performance.now();
+      if(lastVideoTime!==videoEl.currentTime){
+        lastVideoTime=videoEl.currentTime;
+        const results=handLandmarker.detectForVideo(videoEl,startTimeMs);
+
+        ctx.clearRect(0,0,canvasEl.width,canvasEl.height);
+        ctx.drawImage(videoEl,0,0,canvasEl.width,canvasEl.height);
+
+        if(results && results.landmarks.length>0){
+          const lm=results.landmarks[0];
+          drawingUtils.drawLandmarks(lm,{color:"#00ffcc",radius:4});
+          const thumb=lm[4], index=lm[8];
+          const tp={x:thumb.x*canvasEl.width,y:thumb.y*canvasEl.height};
+          const ip={x:index.x*canvasEl.width,y:index.y*canvasEl.height};
+          const d=dist(tp,ip);
+
+          if(d<40) isFist=true; else isFist=false;
+
+          if(currentGame==="grab"){
+            if(isFist && !cube.held &&
+               ip.x>cube.x && ip.x<cube.x+cube.size &&
+               ip.y>cube.y && ip.y<cube.y+cube.size){
+              cube.held=true;
+            }
+            if(cube.held){
+              if(isFist){ cube.x=ip.x-cube.size/2; cube.y=ip.y-cube.size/2; }
+              else cube.held=false;
+            }
+          }
+          if(currentGame==="catch"){
+            basket.x=ip.x-basket.w/2;
+          }
+        }
+
+        if(currentGame==="grab"){
+          ctx.fillStyle="lime"; ctx.fillRect(target.x,target.y,target.size,target.size);
+          ctx.fillStyle="red"; ctx.fillRect(cube.x,cube.y,cube.size,cube.size);
+          if(!isFist && !cube.held &&
+             cube.x+cube.size>target.x && cube.x<target.x+target.size &&
+             cube.y+cube.size>target.y && cube.y<target.y+target.size){
+            score++; scoreEl.textContent=score;
+            setTimeout(spawnCube,1000);
+          }
+        }
+
+        if(currentGame==="catch"){
+          ctx.fillStyle="orange"; ctx.fillRect(basket.x,basket.y,basket.w,basket.h);
+          apples.forEach(a=>a.y+=4);
+          apples.forEach(a=>{
+            ctx.beginPath(); ctx.arc(a.x,a.y,a.size/2,0,Math.PI*2);
+            ctx.fillStyle="red"; ctx.fill();
+          });
+          apples.forEach((a,i)=>{
+            if(a.y+a.size/2>basket.y &&
+               a.x>basket.x && a.x<basket.x+basket.w){
+              if(isFist){ score++; scoreEl.textContent=score; apples.splice(i,1); setTimeout(spawnApple,1000);}
+            }
+          });
+          apples=apples.filter(a=>a.y<canvasEl.height+50);
+          if(Math.random()<0.02) spawnApple();
+        }
+      }
+      requestAnimationFrame(predictWebcam);
+    }
+
+    function startTimer(sec){
+      let t=sec; timerEl.textContent=formatTime(t);
+      timerInterval=setInterval(()=>{
+        t--; timerEl.textContent=formatTime(t);
+        if(t<=0){ clearInterval(timerInterval); endGame(); }
+      },1000);
+    }
+    const formatTime=s=>{
+      const m=Math.floor(s/60),r=s%60;
+      return `${m.toString().padStart(2,'0')}:${r.toString().padStart(2,'0')}`;
+    };
+
+    function endGame(){
+      gameOver=true;
+      document.getElementById("finalScore").innerText=`Your Score: ${score}`;
+      if(score>highScore){highScore=score;}
+      localStorage.setItem(currentGame+"_highscore",String(highScore));
+      document.getElementById("bestScore").innerText=`Best Score: ${highScore}`;
+      document.getElementById("gameOver").style.display="flex";
+      const msg=encodeURIComponent(`I scored ${score} in ${currentGame} game! Best: ${highScore}`);
+      document.getElementById("shareBtn").href=`https://wa.me/?text=${msg}`;
+    }
+
+    window.openGame=async(game)=>{
+      currentGame=game;
+      document.getElementById("home").style.display="none";
+      hud.style.display="flex"; canvasEl.style.display="block";
+      score=0; scoreEl.textContent=0;
+      highScore=Number(localStorage.getItem(game+"_highscore")||0);
+      highScoreEl.textContent=highScore;
+      await loadLandmarker(); await startCamera(); startTimer(60);
+    };
+    window.restartGame=()=>location.reload();
+  </script>
+</body>
+</html>
